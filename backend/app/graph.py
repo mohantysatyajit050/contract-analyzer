@@ -39,6 +39,8 @@ class ContractState(TypedDict, total=False):
     session_id: str
     filename: str
     document_text: str
+    is_contract: bool
+    document_type_reason: str
     user_question: str
     company_name: Optional[str]
     company_context: dict
@@ -48,7 +50,94 @@ class ContractState(TypedDict, total=False):
     review_status: str
     review_notes: Optional[str]
 
+DOCUMENT_TYPE_SYSTEM_PROMPT = """You determine whether a document is a legal
+contract or agreement (e.g. NDA, vendor agreement, employment contract,
+terms of service, lease). Resumes, reports, articles, and other non-legal
+documents are NOT contracts.
+Respond ONLY as JSON with keys: is_contract (true or false) and reason
+(one sentence explaining your judgment).
+"""
 
+
+def _classify_document_type_llm(client: "Groq", document_text: str) -> tuple[bool, str]:
+    import json
+
+    completion = client.chat.completions.create(
+        model=get_settings().llm_model,
+        messages=[
+            {"role": "system", "content": DOCUMENT_TYPE_SYSTEM_PROMPT},
+            {"role": "user", "content": document_text[:2000]},
+        ],
+        temperature=0,
+    )
+    raw = completion.choices[0].message.content.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    try:
+        parsed = json.loads(raw)
+        return bool(parsed.get("is_contract", False)), parsed.get("reason", "")
+    except json.JSONDecodeError:
+        # First attempt produced malformed JSON -- retry once with a
+        # stricter instruction before giving up. LLMs don't reliably
+        # produce valid JSON from a system prompt alone; a single retry
+        # catches the common case cheaply.
+        retry_completion = client.chat.completions.create(
+            model=get_settings().llm_model,
+            messages=[
+                {"role": "system", "content": DOCUMENT_TYPE_SYSTEM_PROMPT},
+                {"role": "user", "content": document_text[:2000]},
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": "That was not valid JSON. Respond with ONLY valid JSON, no other text, no markdown fences."},
+            ],
+            temperature=0,
+        )
+        retry_raw = retry_completion.choices[0].message.content.strip()
+        if retry_raw.startswith("```"):
+            retry_raw = retry_raw.strip("`")
+            if retry_raw.startswith("json"):
+                retry_raw = retry_raw[4:]
+            retry_raw = retry_raw.strip()
+        try:
+            parsed = json.loads(retry_raw)
+            return bool(parsed.get("is_contract", False)), parsed.get("reason", "")
+        except json.JSONDecodeError:
+            return True, "Document type check response could not be parsed after retry; proceeding anyway."
+
+# ---------------------------------------------------------------------------
+# Node 0: verify_document_type_node
+# ---------------------------------------------------------------------------
+def verify_document_type_node(state: ContractState) -> ContractState:
+    """Gate: confirm the uploaded document is actually a contract before
+    spending 40+ LLM calls classifying clauses that were never clauses."""
+    client = _get_groq_client()
+    document_text = state.get("document_text", "")
+
+    if client is None:
+        # No GROQ_API_KEY configured -- can't run the check, so don't block.
+        return {
+            **state,
+            "is_contract": True,
+            "document_type_reason": "Document type check skipped (no GROQ_API_KEY configured).",
+        }
+
+    is_contract, reason = _classify_document_type_llm(client, document_text)
+    return {**state, "is_contract": is_contract, "document_type_reason": reason}
+
+
+def reject_document_node(state: ContractState) -> ContractState:
+    """Short-circuit: skip clause analysis entirely and explain why."""
+    reason = state.get("document_type_reason", "")
+    return {
+        **state,
+        "clauses": [],
+        "clause_analysis": [],
+        "risk_summary": f"This document does not appear to be a contract, so analysis was not performed. {reason}".strip(),
+        "review_status": "rejected",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -269,22 +358,39 @@ def generate_report_node(state: ContractState) -> ContractState:
 # ---------------------------------------------------------------------------
 # Graph assembly
 # ---------------------------------------------------------------------------
+def _route_after_document_check(state: ContractState) -> str:
+    """Conditional edge: only proceed to clause extraction if this is a
+    genuine contract. Otherwise, short-circuit to the rejection node."""
+    return "extract_clauses" if state.get("is_contract", True) else "reject_document"
+
+
 def build_full_graph():
-    """Upload -> extract clauses -> research company -> analyze -> report."""
+    """Verify document type -> extract clauses -> research company -> analyze -> report.
+
+    Non-contract documents are rejected right after the type check, before
+    any clause-level LLM calls are spent on them.
+    """
     graph = StateGraph(ContractState)
+    graph.add_node("verify_document_type", verify_document_type_node)
+    graph.add_node("reject_document", reject_document_node)
     graph.add_node("extract_clauses", extract_clauses_node)
     graph.add_node("researcher", researcher_node)
     graph.add_node("contract_analyzer", contract_analyzer_node)
     graph.add_node("generate_report", generate_report_node)
 
-    graph.set_entry_point("extract_clauses")
+    graph.set_entry_point("verify_document_type")
+    graph.add_conditional_edges(
+        "verify_document_type",
+        _route_after_document_check,
+        {"extract_clauses": "extract_clauses", "reject_document": "reject_document"},
+    )
+    graph.add_edge("reject_document", END)
     graph.add_edge("extract_clauses", "researcher")
     graph.add_edge("researcher", "contract_analyzer")
     graph.add_edge("contract_analyzer", "generate_report")
     graph.add_edge("generate_report", END)
 
     return graph.compile()
-
 
 def build_revision_graph():
     """Re-run just analysis + report after a human requests changes.
