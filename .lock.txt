@@ -1,0 +1,12 @@
+[33mcommit b569cf31bb42a8bcb7289c2cd047b24f46ea53d2[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmaster[m[33m)[m
+Author: mohantysatyajit050 <mohantysatyajit050@gmail.com>
+Date:   Sat Jul 25 12:20:17 2026 +0530
+
+    chore: add .gitignore, config.py, schemas.py
+
+ .gitignore             | 22 [32m++++++++++++++++++++++[m
+ backend/.env.example   |  3 [32m+++[m
+ backend/app/config.py  | 26 [32m++++++++++++++++++++++++++[m
+ backend/app/schemas.py | 44 [32m++++++++++++++++++++++++++++++++++++++++++++[m
+ requirements.lock.txt  |  0
+ 5 files changed, 95 insertions(+)
