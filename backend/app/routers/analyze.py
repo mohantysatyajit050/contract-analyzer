@@ -38,6 +38,8 @@ async def analyze_contract(
     return AnalyzeResponse(
         session_id=session_id,
         filename=result["filename"],
+        is_contract=result.get("is_contract", True),
+        document_type_reason=result.get("document_type_reason"),
         company_context=result.get("company_context", {}),
         clauses=result.get("clauses", []),
         clause_analysis=result.get("clause_analysis", []),

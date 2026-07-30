@@ -24,11 +24,13 @@ class CompanyContext(BaseModel):
 class AnalyzeResponse(BaseModel):
     session_id: str
     filename: str
+    is_contract: bool
+    document_type_reason: Optional[str] = None
     company_context: CompanyContext
     clauses: List[Clause]
     clause_analysis: List[ClauseAnalysis]
     risk_summary: str
-    review_status: str  # "pending"
+    review_status: str  # "pending" | "rejected"
 
 
 class ReviewRequest(BaseModel):
